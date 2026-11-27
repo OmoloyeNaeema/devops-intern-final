@@ -6,11 +6,10 @@ This project uses Grafana Loki, Promtail and Grafana to collect, store and visua
 
 - **Loki:** Stores and makes application logs searchable.
 - **Promtail:** Collects NGINX logs from Nomad allocation log files and forwards them to Loki.
-- **Grafana:** Provides a dashboard for querying and viewing logs.
+- **Grafana:** Provides an interface for querying and viewing logs.
 
 ## 2. Architecture
 
-```text
 NGINX Application (Nomad)
           |
           v
@@ -30,7 +29,7 @@ NGINX Application (Nomad)
 
 From the project root, run:
 
-```Bash
+```bash
 docker compose -f monitoring/docker-compose.yaml up -d
 ```
 
@@ -52,13 +51,39 @@ Check Loki readiness:
 curl http://localhost:3100/ready
 ```
 
-Expected response:
+Observed response:
 
-```text
+
 ready
-```
 
-## 4. Configure Grafana
+## 4. Promtail Log Collection and Labels
+
+Promtail scrapes NGINX standard output logs from Nomad allocation directories.
+
+The host allocation directory is mounted into the Promtail container:
+
+
+Host:      $HOME/nomad-dev-data/alloc
+Container: /var/lib/nomad/alloc
+
+
+The scrape configuration uses:
+
+
+/var/lib/nomad/alloc/*/alloc/logs/nginx.stdout.*
+
+
+The following labels are attached to the log stream:
+
+| Label | Value |
+|---|---|
+| `job` | `nomad-nginx` |
+| `container` | `nginx` |
+| `service` | `nginx-app` |
+
+These labels make it possible to identify and filter the NGINX application logs in Grafana.
+
+## 5. Configure Grafana
 
 1. Open `http://localhost:3000` in your browser.
 2. Log in using the initial local credentials:
@@ -75,70 +100,113 @@ http://loki:3100
 
 7. Click **Save & test**.
 
-## 5. Query Application Logs
+## 6. LogQL Queries
 
 Open **Explore** in Grafana and select Loki.
 
-Use the following LogQL query to display application logs:
+### Display application logs
+
+logql
+{job="nomad-nginx", container="nginx", service="nginx-app"}
+
+### Filter successful HTTP requests
 
 ```logql
-{job="nomad-nginx", service="nginx-app"}
+{job="nomad-nginx", container="nginx", service="nginx-app"} |= " 200 "
 ```
 
-To filter successful HTTP requests:
+### Filter unsuccessful HTTP requests
 
 ```logql
-{job="nomad-nginx", service="nginx-app"} |= " 200 "
+{job="nomad-nginx", container="nginx", service="nginx-app"} |= " 404 "
 ```
 
-To filter unsuccessful HTTP requests:
-
-```logql
-{job="nomad-nginx", service="nginx-app"} |= " 404 "
-```
-
-## 6. Verification Results
+## 7. Verification Results
 
 The monitoring pipeline was tested using requests to the Nomad-deployed NGINX application.
 
-Successful request:
+### Successful request
 
 ```bash
 curl -i http://127.0.0.1:27571/
 ```
 
-The application returned HTTP `200 OK`.
+Observed result: `HTTP/1.1 200 OK`.
 
-Unsuccessful request:
+### Unsuccessful request
 
 ```bash
 curl -i http://127.0.0.1:27571/this-page-does-not-exist
 ```
 
-The application returned HTTP `404 Not Found`.
+Observed result: `HTTP/1.1 404 Not Found`.
 
-Both requests appeared in Grafana Explore.
+### Grafana Explore results
 
-**Observed Grafana results:**
+The first log ingestion check displayed:
 
-- Total log entries displayed: 11
-- Total bytes processed: 1.05 kB
-- Successful request: HTTP 200
-- Unsuccessful request: HTTP 404
-- Common labels: `job=nomad-nginx`, `service=nginx-app`
+- 11 log entries.
+- 1.05 kB total bytes processed.
+- HTTP 200 and HTTP 404 access log entries.
 
-## 7. Screenshots
+After adding the `container` label and recreating Promtail, a new query displayed:
 
-Grafana Explore verification screenshots are available in:
+- 2 fresh log entries.
+- 219 bytes processed.
+- One HTTP 200 request.
+- One HTTP 404 request.
+- All three expected labels: `job`, `container` and `service`.
+
+The final query used:
+
+```logql
+{job="nomad-nginx", container="nginx", service="nginx-app"}
+```
+
+This verified that Promtail successfully collected the fresh NGINX logs and Loki made them available in Grafana.
+
+## 8. Problems Encountered and Resolutions
+
+### Problem 1: Loki readiness delay
+
+**Problem:** The first Loki readiness check returned HTTP 503 because the ingester was still initializing.
+
+**Resolution:** Waited for Loki to finish starting and checked readiness again. Loki subsequently returned `ready`.
+
+### Problem 2: Promtail container restart failure
+
+**Problem:** After updating the Promtail configuration, restarting the existing container failed with a Docker Desktop bind-mount error reporting `no such file or directory`.
+
+**Resolution:** Confirmed that `monitoring/promtail-config.yaml` existed and recreated only the Promtail container using:
+
+```bash
+docker compose -f monitoring/docker-compose.yaml up -d --force-recreate promtail
+```
+
+Promtail then started successfully, loaded the updated configuration and began watching the Nomad allocation log directory.
+
+### Problem 3: Verifying the container label
+
+**Problem:** The original Promtail configuration did not include the required `container` label.
+
+**Resolution:** Added `container: nginx` to the Promtail static labels, validated the Docker Compose configuration, recreated Promtail and ran a new Grafana Explore query. The updated query displayed the expected `container`, `job` and `service` labels.
+
+## 9. Screenshots
+
+Grafana Explore verification screenshots are stored in:
 
 ```text
 docs/screenshots/grafana-explore.png
 docs/screenshots/grafana-explore2.png
+docs/screenshots/grafana-explore-labels.png
 ```
 
-## 8. Notes and Limitations
+The screenshots provide evidence of the collected NGINX logs, HTTP status codes and final labels.
+
+## 10. Notes and Limitations
 
 - Promtail collects NGINX standard output logs from Nomad allocation directories.
 - The monitoring stack is configured for local development and testing.
 - Loki authentication is disabled in this local setup. Do not expose the monitoring ports publicly without appropriate security controls.
 - The Nomad development agent and Consul development agent must remain running for the deployed application and its allocation logs to remain available.
+- This setup is intended for demonstration and learning, not production deployment without additional security and high-availability configuration.
