@@ -15,6 +15,7 @@ scrape_configs:
           - localhost
         labels:
           job: nomad-nginx
+          container: nginx
           service: nginx-app
           __path__: /var/lib/nomad/alloc/*/alloc/logs/nginx.stdout.*
 
